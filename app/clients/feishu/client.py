@@ -13,6 +13,7 @@ from lark_oapi.api.bitable.v1 import (
 from lark_oapi.api.drive.v1 import (
     UploadAllMediaRequest,
     UploadAllMediaRequestBuilder,
+    UploadAllMediaRequestBodyBuilder,
 )
 
 from app.config import get_settings
@@ -49,12 +50,16 @@ class FeishuClient:
         Returns:
             File token of uploaded image
         """
-        request = UploadAllMediaRequestBuilder() \
+        request_body = UploadAllMediaRequestBodyBuilder() \
             .file_name(filename) \
             .parent_type("bitable_image") \
             .parent_node(parent_node) \
             .size(len(image_data)) \
             .file(image_data) \
+            .build()
+
+        request = UploadAllMediaRequestBuilder() \
+            .request_body(request_body) \
             .build()
 
         response = await self._async_request(
