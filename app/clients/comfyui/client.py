@@ -5,7 +5,6 @@ import logging
 from typing import Any, Callable, Optional
 
 import httpx
-import websockets
 
 from app.config import get_settings
 
@@ -55,7 +54,7 @@ class ComfyUIClient:
             "type": folder_type,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(
                 f"{self.http_url}/view",
                 params=params,
@@ -70,57 +69,37 @@ class ComfyUIClient:
         timeout: float = 600.0,
     ) -> dict[str, Any]:
         """
-        Wait for workflow completion via WebSocket.
+        Wait for workflow completion via polling history.
         Returns the execution outputs when done.
         """
-        ws_url = f"{self.ws_url}?clientId={self.client_id}"
+        start_time = asyncio.get_event_loop().time()
+        poll_interval = 1.0
 
-        async with websockets.connect(ws_url) as ws:
-            start_time = asyncio.get_event_loop().time()
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                raise TimeoutError(f"Workflow execution timed out after {timeout}s")
 
-            while True:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout:
-                    raise TimeoutError(f"Workflow execution timed out after {timeout}s")
+            # Check history for completion
+            history = await self.get_history(prompt_id)
+            if prompt_id in history:
+                prompt_history = history[prompt_id]
+                status = prompt_history.get("status", {})
+                status_str = status.get("status_str", "")
 
-                try:
-                    message = await asyncio.wait_for(ws.recv(), timeout=30.0)
-                    data = json.loads(message)
+                if status_str == "success" or status.get("completed"):
+                    return prompt_history
+                elif status_str == "error":
+                    # Extract error message from status messages
+                    messages = status.get("messages", [])
+                    error_msg = "Unknown error"
+                    for msg in messages:
+                        if isinstance(msg, list) and len(msg) >= 2:
+                            if msg[0] == "execution_error":
+                                error_msg = msg[1].get("exception_message", error_msg)
+                    raise RuntimeError(f"ComfyUI execution error: {error_msg}")
 
-                    msg_type = data.get("type")
-
-                    if msg_type == "progress":
-                        msg_data = data.get("data", {})
-                        if msg_data.get("prompt_id") == prompt_id:
-                            value = msg_data.get("value", 0)
-                            max_value = msg_data.get("max", 100)
-                            progress = int((value / max_value) * 100) if max_value > 0 else 0
-                            if progress_callback:
-                                progress_callback(progress)
-
-                    elif msg_type == "executing":
-                        msg_data = data.get("data", {})
-                        if msg_data.get("prompt_id") == prompt_id:
-                            if msg_data.get("node") is None:
-                                # Execution completed
-                                break
-
-                    elif msg_type == "execution_error":
-                        msg_data = data.get("data", {})
-                        if msg_data.get("prompt_id") == prompt_id:
-                            error_msg = msg_data.get("exception_message", "Unknown error")
-                            raise RuntimeError(f"ComfyUI execution error: {error_msg}")
-
-                except asyncio.TimeoutError:
-                    # WebSocket recv timeout, continue waiting
-                    continue
-
-        # Get the execution result from history
-        history = await self.get_history(prompt_id)
-        if prompt_id not in history:
-            raise RuntimeError(f"Prompt {prompt_id} not found in history")
-
-        return history[prompt_id]
+            await asyncio.sleep(poll_interval)
 
     async def get_outputs_for_nodes(
         self,

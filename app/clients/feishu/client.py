@@ -1,3 +1,4 @@
+import io
 import logging
 from typing import Optional
 
@@ -50,12 +51,13 @@ class FeishuClient:
         Returns:
             File token of uploaded image
         """
+        file_obj = io.BytesIO(image_data)
         request_body = UploadAllMediaRequestBodyBuilder() \
             .file_name(filename) \
             .parent_type("bitable_image") \
             .parent_node(parent_node) \
             .size(len(image_data)) \
-            .file(image_data) \
+            .file(file_obj) \
             .build()
 
         request = UploadAllMediaRequestBuilder() \
