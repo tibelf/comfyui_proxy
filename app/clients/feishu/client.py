@@ -1,6 +1,6 @@
 import io
 import logging
-from typing import Optional
+from typing import Optional, Any
 
 import lark_oapi as lark
 from lark_oapi.api.bitable.v1 import (
@@ -8,6 +8,8 @@ from lark_oapi.api.bitable.v1 import (
     CreateAppTableRecordRequestBuilder,
     UpdateAppTableRecordRequest,
     UpdateAppTableRecordRequestBuilder,
+    GetAppTableRecordRequest,
+    GetAppTableRecordRequestBuilder,
     AppTableRecord,
     AppTableRecordBuilder,
 )
@@ -143,6 +145,44 @@ class FeishuClient:
 
         return response.data.record.record_id
 
+    async def get_record(
+        self,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+    ) -> dict[str, Any]:
+        """
+        Get a single record from a table.
+
+        Args:
+            app_token: Bitable app token
+            table_id: Table ID
+            record_id: Record ID
+
+        Returns:
+            Dictionary of field names to values
+        """
+        request: GetAppTableRecordRequest = (
+            GetAppTableRecordRequestBuilder()
+            .app_token(app_token)
+            .table_id(table_id)
+            .record_id(record_id)
+            .build()
+        )
+
+        response = await self._async_request(
+            lambda: self.client.bitable.v1.app_table_record.get(request)
+        )
+
+        if not response.success():
+            logger.error(
+                f"Failed to get record {record_id}: "
+                f"code={response.code}, msg={response.msg}"
+            )
+            raise Exception(f"Failed to get record: {response.msg}")
+
+        return response.data.record.fields
+
     async def upload_and_attach_images(
         self,
         app_token: str,
@@ -176,9 +216,33 @@ class FeishuClient:
             file_tokens.append(file_token)
             logger.info(f"Uploaded image {filename}, token: {file_token}")
 
-        # Prepare attachment field value
-        attachments = [{"file_token": token} for token in file_tokens]
-        fields = {image_field: attachments}
+        # If updating existing record, read current images to append to them
+        existing_attachments = []
+        if record_id:
+            try:
+                existing_fields = await self.get_record(
+                    app_token=app_token,
+                    table_id=table_id,
+                    record_id=record_id,
+                )
+                # Extract existing image file_tokens
+                existing_images = existing_fields.get(image_field, [])
+                if isinstance(existing_images, list):
+                    existing_attachments = [
+                        {"file_token": img["file_token"]}
+                        for img in existing_images
+                        if isinstance(img, dict) and "file_token" in img
+                    ]
+                    logger.info(
+                        f"Found {len(existing_attachments)} existing images in record"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to get existing images: {e}, will overwrite")
+
+        # Merge existing images with new images (append logic)
+        new_attachments = [{"file_token": token} for token in file_tokens]
+        all_attachments = existing_attachments + new_attachments
+        fields = {image_field: all_attachments}
 
         # Create or update record
         if record_id:
@@ -188,12 +252,17 @@ class FeishuClient:
                 record_id=record_id,
                 fields=fields,
             )
+            logger.info(
+                f"Updated record {record_id} with {len(new_attachments)} new images "
+                f"(total: {len(all_attachments)} images)"
+            )
         else:
             result_record_id = await self.create_record(
                 app_token=app_token,
                 table_id=table_id,
                 fields=fields,
             )
+            logger.info(f"Created new record {result_record_id} with {len(file_tokens)} images")
 
         return result_record_id, file_tokens
 

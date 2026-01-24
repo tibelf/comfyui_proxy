@@ -25,7 +25,7 @@ class ComfyUIClient:
             "client_id": self.client_id,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0, http1=True, http2=False) as client:
             response = await client.post(
                 f"{self.http_url}/prompt",
                 json=payload,
@@ -36,7 +36,7 @@ class ComfyUIClient:
 
     async def get_history(self, prompt_id: str) -> dict[str, Any]:
         """Get execution history for a prompt"""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0, http1=True, http2=False) as client:
             response = await client.get(f"{self.http_url}/history/{prompt_id}")
             response.raise_for_status()
             return response.json()
@@ -54,7 +54,7 @@ class ComfyUIClient:
             "type": folder_type,
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, http1=True, http2=False) as client:
             response = await client.get(
                 f"{self.http_url}/view",
                 params=params,
@@ -134,10 +134,9 @@ class ComfyUIClient:
     async def check_health(self) -> bool:
         """Check if ComfyUI is reachable"""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=5.0, http1=True, http2=False) as client:
                 response = await client.get(
                     f"{self.http_url}/system_stats",
-                    timeout=5.0,
                 )
                 return response.status_code == 200
         except Exception:
