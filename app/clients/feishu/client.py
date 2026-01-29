@@ -1,5 +1,7 @@
+import asyncio
 import io
 import logging
+import time
 from typing import Optional, Any
 
 import lark_oapi as lark
@@ -42,6 +44,7 @@ class FeishuClient:
         filename: str,
         parent_node: str,
         max_retries: int = 3,
+        timeout: float = 60.0,
     ) -> str:
         """
         Upload image to Feishu Drive and return the file token.
@@ -52,14 +55,17 @@ class FeishuClient:
             filename: Image filename
             parent_node: Parent folder token in Feishu Drive
             max_retries: Maximum number of retry attempts (default: 3)
+            timeout: Timeout in seconds for each upload attempt (default: 60.0)
 
         Returns:
             File token of uploaded image
         """
-        import asyncio
+        start_time = time.time()
+        logger.info(f"Starting upload: {filename} ({len(image_data)} bytes)")
 
         last_error = None
         for attempt in range(max_retries + 1):
+            attempt_start = time.time()
             try:
                 file_obj = io.BytesIO(image_data)
                 request_body = UploadAllMediaRequestBodyBuilder() \
@@ -75,36 +81,67 @@ class FeishuClient:
                     .build()
 
                 response = await self._async_request(
-                    lambda: self.client.drive.v1.media.upload_all(request)
+                    lambda: self.client.drive.v1.media.upload_all(request),
+                    timeout=timeout,
                 )
 
+                attempt_elapsed = time.time() - attempt_start
                 if response.success():
+                    total_elapsed = time.time() - start_time
                     if attempt > 0:
-                        logger.info(f"Upload succeeded after {attempt} retries: {filename}")
+                        logger.info(
+                            f"Upload succeeded after {attempt} retries: {filename} "
+                            f"in {total_elapsed:.2f}s"
+                        )
+                    else:
+                        logger.info(
+                            f"Upload completed: {filename} in {attempt_elapsed:.2f}s"
+                        )
                     return response.data.file_token
 
                 # Check if this is a retryable error
                 error_msg = f"{response.code} - {response.msg}"
                 last_error = RuntimeError(f"Failed to upload image: {error_msg}")
+                logger.warning(
+                    f"Upload failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg} "
+                    f"after {attempt_elapsed:.2f}s"
+                )
 
                 if attempt < max_retries:
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
-                    logger.warning(
-                        f"Upload failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}. "
-                        f"Retrying in {wait_time}s..."
-                    )
+                    logger.warning(f"Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+
+            except asyncio.TimeoutError:
+                attempt_elapsed = time.time() - attempt_start
+                last_error = asyncio.TimeoutError(
+                    f"Upload timed out after {timeout}s: {filename}"
+                )
+                logger.error(
+                    f"Upload timeout (attempt {attempt + 1}/{max_retries + 1}): "
+                    f"{filename} after {attempt_elapsed:.2f}s"
+                )
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
 
             except Exception as e:
+                attempt_elapsed = time.time() - attempt_start
                 last_error = e
+                logger.error(
+                    f"Upload exception (attempt {attempt + 1}/{max_retries + 1}): {e} "
+                    f"after {attempt_elapsed:.2f}s"
+                )
                 if attempt < max_retries:
                     wait_time = 2 ** attempt
-                    logger.warning(
-                        f"Upload exception (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                        f"Retrying in {wait_time}s..."
-                    )
+                    logger.warning(f"Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
 
+        total_elapsed = time.time() - start_time
+        logger.error(
+            f"Upload failed after all retries: {filename}, total time: {total_elapsed:.2f}s"
+        )
         raise last_error
 
     async def create_record(
@@ -296,14 +333,26 @@ class FeishuClient:
 
         return result_record_id, file_tokens
 
-    async def _async_request(self, sync_func):
+    async def _async_request(self, sync_func, timeout: float = 60.0):
         """
-        Execute a synchronous Feishu SDK request.
+        Execute a synchronous Feishu SDK request with timeout.
         The lark-oapi SDK is synchronous, so we run it in a thread pool.
+
+        Args:
+            sync_func: Synchronous function to execute
+            timeout: Timeout in seconds (default: 60.0)
+
+        Returns:
+            Response from the SDK request
+
+        Raises:
+            asyncio.TimeoutError: If the request times out
         """
-        import asyncio
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, sync_func)
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, sync_func),
+            timeout=timeout,
+        )
 
 
 _client: Optional[FeishuClient] = None
