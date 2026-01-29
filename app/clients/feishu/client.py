@@ -41,41 +41,71 @@ class FeishuClient:
         image_data: bytes,
         filename: str,
         parent_node: str,
+        max_retries: int = 3,
     ) -> str:
         """
         Upload image to Feishu Drive and return the file token.
+        Includes automatic retry mechanism for network instability.
 
         Args:
             image_data: Image bytes
             filename: Image filename
             parent_node: Parent folder token in Feishu Drive
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
             File token of uploaded image
         """
-        file_obj = io.BytesIO(image_data)
-        request_body = UploadAllMediaRequestBodyBuilder() \
-            .file_name(filename) \
-            .parent_type("bitable_image") \
-            .parent_node(parent_node) \
-            .size(len(image_data)) \
-            .file(file_obj) \
-            .build()
+        import asyncio
 
-        request = UploadAllMediaRequestBuilder() \
-            .request_body(request_body) \
-            .build()
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                file_obj = io.BytesIO(image_data)
+                request_body = UploadAllMediaRequestBodyBuilder() \
+                    .file_name(filename) \
+                    .parent_type("bitable_image") \
+                    .parent_node(parent_node) \
+                    .size(len(image_data)) \
+                    .file(file_obj) \
+                    .build()
 
-        response = await self._async_request(
-            lambda: self.client.drive.v1.media.upload_all(request)
-        )
+                request = UploadAllMediaRequestBuilder() \
+                    .request_body(request_body) \
+                    .build()
 
-        if not response.success():
-            raise RuntimeError(
-                f"Failed to upload image: {response.code} - {response.msg}"
-            )
+                response = await self._async_request(
+                    lambda: self.client.drive.v1.media.upload_all(request)
+                )
 
-        return response.data.file_token
+                if response.success():
+                    if attempt > 0:
+                        logger.info(f"Upload succeeded after {attempt} retries: {filename}")
+                    return response.data.file_token
+
+                # Check if this is a retryable error
+                error_msg = f"{response.code} - {response.msg}"
+                last_error = RuntimeError(f"Failed to upload image: {error_msg}")
+
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                    logger.warning(
+                        f"Upload failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Upload exception (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+
+        raise last_error
 
     async def create_record(
         self,
